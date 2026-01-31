@@ -1,0 +1,8 @@
+services:
+  code-agent:
+    build: .
+    container_name: code_agent
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: ["python", "-u", "/app/agent.py"]
