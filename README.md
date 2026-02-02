@@ -4,11 +4,9 @@ This repo is a workspace created to experience "agentic AI" concepts on local mo
 
 All experiments are run locally via Ollama. It is possible to test these concepts in a completely local environment without depending on cloud APIs.
 
-## Why qwen2.5:7b-instruct?
 
 Model selection is a critical factor. A model capable of tool calling—that is, deciding when to call a function—is required. At the same time, it must be small enough to run on reasonable hardware.
 
-`qwen2.5:7b-instruct` strikes this balance. With 7 billion parameters, it possesses tool use capabilities and can run comfortably on an average GPU. Larger models may provide better results, but this size is sufficient for experimental work.
 
 ## Content
 
