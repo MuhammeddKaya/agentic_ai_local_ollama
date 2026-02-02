@@ -32,6 +32,7 @@ Ollama must be running in the background.
 cd agentic_ai/code_agent_docker
 docker compose up --build
 
+docker compose run code-agent
 
 
 The Docker version uses network_mode: host, allowing access to Ollama at localhost:11434 from within the container.

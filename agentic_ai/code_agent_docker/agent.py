@@ -2,152 +2,209 @@ import requests
 import subprocess
 import tempfile
 import re
+import os
+import textwrap
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:7b-instruct"
+MODEL =  "deepseek-v3.2:cloud"#"llama3.1:8b"
 
-# ⚠️ Güvenlik: yasaklı ifadeler
-FORBIDDEN = [
-    "import os",
-    "import sys",
-    "subprocess",
-    "socket",
-    "requests",
-    "__import__",
-]
+
+SANDBOX = "/sandbox"
+MAX_STEPS = 12
+
 
 # -------------------------------------------------
-# Ollama çağrısı
+# Ollama
 # -------------------------------------------------
 def call_ollama(prompt: str) -> str:
-    response = requests.post(
+    r = requests.post(
         OLLAMA_URL,
         json={
             "model": MODEL,
             "prompt": prompt,
-            "stream": False
+            "stream": False,
         },
-        timeout=120
+        timeout=180,
     )
-    response.raise_for_status()
-    return response.json()["response"]
+    r.raise_for_status()
+    return r.json()["response"]
 
 
 # -------------------------------------------------
-# Markdown temizleme
+# Code extraction
 # -------------------------------------------------
-def extract_python_code(text: str) -> str:
-    match = re.search(r"```(?:python)?\n(.*?)```", text, re.S)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+def extract_code(text: str) -> str:
+    m = re.search(r"```(?:python)?\n(.*?)```", text, re.S)
+    return m.group(1).strip() if m else text.strip()
 
 
 # -------------------------------------------------
-# Basit güvenlik kontrolü
+# Execute code
 # -------------------------------------------------
-def is_code_safe(code: str) -> bool:
-    return not any(bad in code for bad in FORBIDDEN)
-
-
-# -------------------------------------------------
-# Kod çalıştırma (sandbox)
-# -------------------------------------------------
-def run_code(code: str) -> str:
-    if not is_code_safe(code):
-        return "❌ Unsafe code detected."
-
+def execute(code: str) -> str:
     with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".py",
-        dir="/sandbox",
-        delete=False
+        mode="w", suffix=".py", dir=SANDBOX, delete=False
     ) as f:
         f.write(code)
-        filename = f.name
+        path = f.name
 
     try:
-        result = subprocess.run(
-            ["python", filename],
+        r = subprocess.run(
+            ["python", path],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=30,
         )
-        return result.stdout.strip() or result.stderr.strip()
+        return (r.stdout + r.stderr).strip()
     except Exception as e:
         return str(e)
 
 
 # -------------------------------------------------
-# Self-healing agent loop
+# ERROR CLASSIFICATION (MODEL DECIDES)
 # -------------------------------------------------
-def run_agent(task: str, max_retries: int = 3):
+def classify_error(code: str, output: str) -> str:
     prompt = f"""
-You are a Python assistant.
+You are an autonomous debugger.
 
-Rules:
-- Output ONLY valid Python code
-- No explanations
-- No markdown
-- Allowed imports: math, datetime, random
-- ALL file operations MUST use /sandbox
-- Print the result
+CODE:
+{code}
+
+OUTPUT:
+{output}
+
+Classify the failure as ONE of:
+- ENV_ERROR (missing dependency, missing binary, permissions, OS, path)
+- CODE_ERROR (logic bug, syntax, incorrect API usage)
+- UNKNOWN
+
+Output ONLY the label.
+"""
+    return call_ollama(prompt).strip()
+
+
+# -------------------------------------------------
+# ENV FIX STRATEGY
+# -------------------------------------------------
+def fix_environment(task: str, code: str, output: str) -> str:
+    prompt = f"""
+You are fixing an ENVIRONMENT failure.
 
 Task:
 {task}
-"""
 
-    for attempt in range(1, max_retries + 1):
-        raw = call_ollama(prompt)
-        print(f"\n📥 Raw model output (attempt {attempt}):\n{raw}")
-
-        code = extract_python_code(raw)
-        print("\n🧹 Sanitized code:\n", code)
-
-        output = run_code(code)
-        print("\n📤 Execution output:\n", output)
-
-        # ✅ başarı
-        if not any(err in output for err in ["Traceback", "Error", "PermissionError"]):
-            return output
-
-        # ❌ hata → modele geri ver
-        prompt = f"""
-The following Python code failed.
-
-Code:
+Broken code:
 {code}
 
-Error:
+Error output:
 {output}
 
-Fix the code.
+Rules:
+- Output ONLY Python code
+- Use python -m pip if installing
+- NEVER assume tools exist
+- Verify before using
+- Use /sandbox paths only
+- Be defensive
+
+Goal:
+Adapt environment so task can succeed.
+"""
+    return extract_code(call_ollama(prompt))
+
+
+# -------------------------------------------------
+# CODE FIX STRATEGY
+# -------------------------------------------------
+def fix_code(task: str, code: str, output: str) -> str:
+    prompt = f"""
+You are fixing a CODE LOGIC failure.
+
+Task:
+{task}
+
+Broken code:
+{code}
+
+Error output:
+{output}
 
 Rules:
 - Output ONLY corrected Python code
 - No explanations
-- No markdown
-- Use /sandbox for file paths
+- Keep environment assumptions minimal
+- Use python -m <module> style
 """
+    return extract_code(call_ollama(prompt))
 
-    return "❌ Failed after multiple attempts."
+
+# -------------------------------------------------
+# MAIN AGENT LOOP
+# -------------------------------------------------
+def run_agent(task: str):
+    code = ""
+
+    for step in range(1, MAX_STEPS + 1):
+        print(f"\n🧠 STEP {step}")
+
+        # generate code if first run
+        if not code:
+            prompt = f"""
+You are a Python autonomous agent running in a Linux container.
+
+Rules:
+- Output ONLY Python code
+- No explanations
+- No markdown
+- Assume NOTHING exists
+- Verify before use
+- Use /sandbox for files
+- Prefer python -m <module>
+
+Task:
+{task}
+"""
+            code = extract_code(call_ollama(prompt))
+
+        print("\n📥 CODE:\n", code)
+
+        output = execute(code)
+        print("\n📤 OUTPUT:\n", output)
+
+        # success
+        if output and not any(x in output for x in ["Traceback", "Error", "Exception"]):
+            print("\n✅ TASK COMPLETED")
+            return output
+
+        # classify
+        error_type = classify_error(code, output)
+        print("\n🧩 ERROR TYPE:", error_type)
+
+        if error_type == "ENV_ERROR":
+            code = fix_environment(task, code, output)
+        elif error_type == "CODE_ERROR":
+            code = fix_code(task, code, output)
+        else:
+            print("\n❌ UNKNOWN FAILURE — stopping")
+            return output
+
+    return "\n❌ FAILED AFTER MAX STEPS"
 
 
 # -------------------------------------------------
 # CLI
 # -------------------------------------------------
 if __name__ == "__main__":
-    print("🐳 Docker Code Agent (Ollama powered)")
+    print(f"🤖 Autonomous Container Agent ({MODEL})")
 
     while True:
         try:
             task = input("\nTask (or 'exit'): ")
             if task.lower() in {"exit", "quit"}:
-                print("👋 Bye")
                 break
 
             result = run_agent(task)
-            print("\n✅ Final result:\n", result)
+            print("\n🎯 FINAL RESULT:\n", result)
 
         except KeyboardInterrupt:
             print("\n👋 Interrupted")
